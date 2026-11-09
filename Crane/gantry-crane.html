@@ -670,6 +670,14 @@ export class Lab {
     this.q = new URLSearchParams(location.search)
     this.filmMode = this.q.has('film')
     this.embed = this.q.has('embed')
+    // Render quality matches the scrubber master: high / balanced / lite.
+    // The old ?low=1 bookmark still opens the page in Lite.
+    this.quality = (this.q.get('quality') || (this.q.has('low') ? 'lite' : 'high')).toLowerCase()
+    if (!['high', 'balanced', 'lite'].includes(this.quality)) this.quality = 'high'
+    this.qualityExplicit = this.q.has('quality') || this.q.has('low')
+    this._qualityAuto = false
+    this.contactEvery = 1
+    this.contactFrame = 0
     this.time = 0
     this.timeScale = 1
     this.parts = []
@@ -945,6 +953,36 @@ export class Lab {
     const rim = new THREE.DirectionalLight(0xdbe8ff, paper ? 0.9 : 1.8); rim.position.set(4, 3, -5); this.scene.add(rim)
     const fill = new THREE.HemisphereLight(0xffffff, paper ? 0xd9d5cc : 0x202020, paper ? 0.2 : 0.15); this.scene.add(fill)
     this._contact = new ContactShadow(this, paper ? 0.7 : 0.85)
+    this.setQuality(this.quality)
+  }
+
+  /**
+   * Render quality, identical to the scrubber master. The scene is drawn
+   * several times per frame, so DPR / GTAO / bloom / shadow size / contact
+   * shadow cadence are the difference between a smooth and a laggy page.
+   */
+  setQuality(level) {
+    if (!['high', 'balanced', 'lite'].includes(level)) level = 'high'
+    this.quality = level
+    const r = this.renderer, comp = this.composer
+    const cap = level === 'high' ? 2 : level === 'balanced' ? 1.25 : 1
+    const dpr = this.filmMode ? Number(this.q.get('ss') || 1) : Math.min(devicePixelRatio || 1, cap)
+    r.setPixelRatio(dpr); comp.setPixelRatio(dpr)
+    this._resize()
+    this.ao.enabled = level === 'high'
+    this.bloom.enabled = level !== 'lite'
+    const S = level === 'high' ? 2048 : 1024
+    const sh = this.key.shadow
+    if (sh.mapSize.x !== S) {
+      sh.mapSize.set(S, S)
+      if (sh.map) { sh.map.dispose(); sh.map = null }
+      if (sh.mapPass) { sh.mapPass.dispose(); sh.mapPass = null }
+    }
+    this.contactEvery = level === 'high' ? 1 : level === 'balanced' ? 2 : 6
+    this.contactFrame = 0
+    const b = document.getElementById('labQuality')
+    if (b) b.textContent = `Quality · ${level[0].toUpperCase() + level.slice(1)}${this._qualityAuto && !this.qualityExplicit ? ' (auto)' : ''}`
+    return level
   }
 
   setView(v) {
@@ -1167,7 +1205,7 @@ export class Lab {
     }
     this.camera.updateMatrixWorld()
     CUT.proj.value.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse)
-    this._contact.update()
+    if (this.contactFrame++ % this.contactEvery === 0) this._contact.update()
     this.grade.uniforms.uTime.value = this.time
     this.composer.render(dt)
     this._updateLabels()
@@ -1196,6 +1234,17 @@ export class Lab {
       const dt = clamp((now - last) / 1000, 0, 0.05); last = Math.max(last, now)
       if (this._assembly > 0) this._assembly = Math.max(0, 1 - (now - t0 - 500) / 2600)
       this.render(dt)
+      // Adaptive quality, same rule as the scrubber master: if 90 consecutive
+      // frames average >45 ms, step down once (never while filming).
+      if (!this.filmMode && !this.qualityExplicit && this.quality !== 'lite') {
+        ;(this._perfDt ??= []).push(dt)
+        if (this._perfDt.length > 90) this._perfDt.shift()
+        this._perfFrames = (this._perfFrames ?? 0) + 1
+        if (this._perfFrames > 120 && this._perfFrames % 90 === 0) {
+          const avg = this._perfDt.reduce((a, b) => a + b, 0) / Math.max(1, this._perfDt.length)
+          if (avg > 0.045) { this._qualityAuto = true; this.setQuality(this.quality === 'high' ? 'balanced' : 'lite') }
+        }
+      }
       requestAnimationFrame(loop)
     }
     requestAnimationFrame(loop)
@@ -2199,28 +2248,42 @@ const DEMO = {
 }
 lab.film('main', DEMO)
 
-// Fast mode (?low): quarter the pixel work, shadow map off, AO and bloom off.
-// Applied before the render loop begins; the contact-shadow pool still
-// grounds the machine. The film recorder always runs at full quality.
-const LOW = !lab.filmMode && new URLSearchParams(location.search).has('low')
-if (LOW) {
-  lab.renderer.setPixelRatio(1)
-  lab.renderer.shadowMap.enabled = false
-  if (lab.key) lab.key.castShadow = false
-  if (lab.ao && 'enabled' in lab.ao) lab.ao.enabled = false
-  if (lab.bloom && 'enabled' in lab.bloom) lab.bloom.enabled = false
-}
+// Render quality is now owned by Lab.setQuality(), matching the scrubber
+// master. ?quality=high|balanced|lite selects it; the old ?low=1 bookmark
+// maps to Lite in the Lab constructor.
 
-// --- in-page demo player: steps DEMO on the real animation clock
-const demoUI = { btn: null, wrap: null, bar: null }
-const DP = { on: false, raf: 0, t0: null, off: 0, jump: null, fired: new Set(), sl: null, prevOrbit: undefined }
+// --- in-page demo player: steps DEMO on the real animation clock.
+// The scrubber page is the UI master: the top tool strip, Play demo button,
+// Quality button and the wide caption plate are intentionally identical.
+const demoUI = { btn: null, label: null, reset: null, quality: null, panel: null, subB: null, subS: null, metaN: null, metaT: null, bar: null }
+const DP = { on: false, playing: false, raf: 0, t0: null, off: 0, curT: 0, jump: null, fired: new Set(), sl: null, prevOrbit: undefined, prevPaused: false }
+const BEATS = DEMO.events.filter((e) => e.beat).length
+const clock = (t) => Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0')
+
+function paintPlay() {
+  if (!demoUI.btn) return
+  const label = !DP.on ? 'Play demo' : DP.playing ? 'Pause demo' : 'Resume demo'
+  demoUI.btn.firstChild.textContent = (!DP.on || !DP.playing) ? '▶ ' : '❚❚ '
+  demoUI.label.textContent = label
+  demoUI.btn.classList.toggle('primary', !DP.on || !DP.playing)
+}
+function paintQuality() {
+  if (!demoUI.quality) return
+  const level = lab.quality
+  demoUI.quality.textContent = `Quality · ${level[0].toUpperCase() + level.slice(1)}${lab._qualityAuto && !lab.qualityExplicit ? ' (auto)' : ''}`
+}
 function demoStep(t) {
   DEMO.events.forEach((e, i) => {
     if (t >= e.t && !DP.fired.has(i)) {
       DP.fired.add(i)
       if (e.set) { for (const [k, v] of Object.entries(e.set)) lab.target[k] = v; lab._syncButtons() }
       if (e.slider) DP.sl = { ...e.slider, t0: t, from: lab.controls[e.slider.id].value }
-      if (e.beat) lab._beat = { n: e.beat[0], a: e.beat[1], b: e.beat[2], t0: t }
+      if (e.beat) {
+        lab._beat = { n: e.beat[0], a: e.beat[1], b: e.beat[2], t0: t }
+        if (demoUI.subB) demoUI.subB.textContent = e.beat[1]
+        if (demoUI.subS) demoUI.subS.textContent = e.beat[2]
+        if (demoUI.metaN) demoUI.metaN.textContent = `${e.beat[0]} / ${String(BEATS).padStart(2, '0')}`
+      }
       if (e.cursor) lab._cursorEv(e.cursor, t)
       e.do?.(lab)
     }
@@ -2235,72 +2298,196 @@ function demoStep(t) {
   lab._applyView(v)
   lab._updateBeat(t)
   lab._updateCursor(t)
-  if (demoUI.bar) demoUI.bar.style.width = (clamp(t / DEMO.len) * 100) + '%'
+  if (demoUI.bar) demoUI.bar.style.width = (clamp(t / DEMO.len) * 100).toFixed(2) + '%'
+  if (demoUI.metaT) demoUI.metaT.textContent = `${clock(t)} / ${clock(DEMO.len)}`
 }
 function demoFrame(now) {
-  if (!DP.on) return
+  if (!DP.on || !DP.playing) return
   if (DP.t0 == null) DP.t0 = now
   let t = DP.off + (now - DP.t0) / 1000
   if (DP.jump != null) { DP.off += DP.jump - t; t = DP.jump; DP.jump = null }
+  DP.curT = t
   demoStep(t)
   if (t >= DEMO.len) { demoStop(); return }
   DP.raf = requestAnimationFrame(demoFrame)
 }
-function demoPlay() {
-  if (DP.on || lab.filmMode) return
-  DP.on = true; DP.t0 = null; DP.off = 0; DP.jump = null; DP.fired = new Set(); DP.sl = null
+function demoStart() {
+  if (lab.filmMode) return
+  if (DP.on) demoStop()
+  DP.on = true; DP.playing = true; DP.t0 = null; DP.off = 0; DP.curT = 0; DP.jump = null; DP.fired = new Set(); DP.sl = null
   DP.prevOrbit = lab.o.autoOrbit; lab.o.autoOrbit = false
+  DP.prevPaused = lab.paused; lab.paused = false
   if (lab._assembly > 0) lab._assembly = 0
-  if (demoUI.btn) { demoUI.btn.disabled = true; demoUI.btn.textContent = 'Playing…' }
-  if (demoUI.wrap) demoUI.wrap.style.display = 'flex'
+  lab._syncButtons()
+  if (demoUI.panel) {
+    demoUI.panel.classList.add('show')
+    if (demoUI.subB) demoUI.subB.textContent = ''
+    if (demoUI.subS) demoUI.subS.textContent = ''
+    if (demoUI.metaN) demoUI.metaN.textContent = `01 / ${String(BEATS).padStart(2, '0')}`
+    if (demoUI.metaT) demoUI.metaT.textContent = `0:00 / ${clock(DEMO.len)}`
+  }
+  if (demoUI.bar) demoUI.bar.style.width = '0%'
+  document.documentElement.classList.add('demo-on')
+  paintPlay()
   DP.raf = requestAnimationFrame(demoFrame)
+}
+function demoPause() {
+  if (!DP.on || !DP.playing) return
+  DP.playing = false
+  cancelAnimationFrame(DP.raf)
+  DP.off = DP.curT
+  DP.t0 = null
+  lab.paused = true
+  lab._syncButtons()
+  paintPlay()
+}
+function demoResume() {
+  if (!DP.on || DP.playing) return
+  DP.playing = true
+  DP.t0 = null
+  lab.paused = false
+  lab._syncButtons()
+  paintPlay()
+  DP.raf = requestAnimationFrame(demoFrame)
+}
+function demoToggle() {
+  if (!DP.on) demoStart()
+  else if (DP.playing) demoPause()
+  else demoResume()
 }
 function demoStop() {
   if (!DP.on) return
-  DP.on = false; cancelAnimationFrame(DP.raf)
+  DP.on = false; DP.playing = false; cancelAnimationFrame(DP.raf)
   lab.target.cut = 0; lab.target.labels = 0; lab.target.explode = 0; lab.target.xray = 0; lab.target.slow = 0
   if (lab.broken) lab.resetBreak()
   lab.controls.load.set(22)
   lab._beat = null; lab._updateBeat(0)
   lab._cur = null; lab.$('.lab-cursor').style.opacity = '0'
+  lab.paused = DP.prevPaused
   lab.o.autoOrbit = DP.prevOrbit
   lab.setView({ ...HOME_VIEW })
   lab._syncButtons()
-  if (demoUI.btn) { demoUI.btn.disabled = false; demoUI.btn.textContent = '▶ Demo' }
-  if (demoUI.wrap) demoUI.wrap.style.display = 'none'
+  document.documentElement.classList.remove('demo-on')
+  if (demoUI.panel) demoUI.panel.classList.remove('show')
   if (demoUI.bar) demoUI.bar.style.width = '0%'
+  paintPlay()
 }
-window.__demo = { play: demoPlay, stop: demoStop, seek: (t) => { DP.jump = t }, get on() { return DP.on } }
+window.__demo = {
+  play: demoStart, start: demoStart, stop: demoStop, toggle: demoToggle,
+  pause: demoPause, resume: demoResume,
+  seek: (t) => { DP.jump = t }, paintPlay,
+  get on() { return DP.on },
+  get state() { return { active: DP.on, playing: DP.playing, t: DP.curT } }
+}
 window.__craneParts = { reelGroups, loadGroup, yardBox, stairs: G.stairs, S }
 
 lab.start()
 
-// Demo + Fast buttons in the modes row, plus the demo progress / stop pill.
-// Normal mode only — the film recorder keeps the kit's clean UI.
+// Scrubber-master toolbar: Play demo / Restart / Quality sit under /machine.
+// The bottom .lab-modes row keeps only the solver controls.
 if (!lab.filmMode) {
-  const modesEl = lab.$('.lab-modes')
-  const mkBtn = (txt) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = txt; modesEl.appendChild(b); return b }
-  const demoBtn = mkBtn('▶ Demo')
-  demoUI.btn = demoBtn
-  demoBtn.addEventListener('click', (e) => { e.stopPropagation(); demoPlay() })
-  const lowOn = new URLSearchParams(location.search).has('low')
-  const fastBtn = mkBtn(lowOn ? '⚡ Fast ✓' : '⚡ Fast')
-  if (lowOn) fastBtn.classList.add('act')
-  fastBtn.addEventListener('click', (e) => { e.stopPropagation(); const q = new URLSearchParams(location.search); if (q.has('low')) q.delete('low'); else q.set('low', '1'); location.search = q.toString() })
-  const wrap = document.createElement('div')
-  wrap.style.cssText = 'position:absolute;top:14px;left:50%;transform:translateX(-50%);display:none;align-items:center;gap:10px;z-index:40'
-  const track = document.createElement('div')
-  track.style.cssText = 'width:180px;height:3px;background:rgba(60,55,50,.18);border-radius:2px;overflow:hidden'
-  const bar = document.createElement('div')
-  bar.style.cssText = 'height:100%;width:0%;background:#e4572e'
-  track.appendChild(bar)
-  const stopBtn = document.createElement('button')
-  stopBtn.type = 'button'; stopBtn.textContent = '✕ Stop'
-  stopBtn.style.cssText = 'font:500 13px Inter,system-ui,sans-serif;color:#2a2724;background:rgba(255,255,255,.8);border:1px solid rgba(60,55,50,.25);border-radius:999px;padding:.35em .9em;cursor:pointer'
-  stopBtn.addEventListener('click', () => demoStop())
-  wrap.appendChild(track); wrap.appendChild(stopBtn)
-  lab.ui.appendChild(wrap)
-  demoUI.wrap = wrap; demoUI.bar = bar
+  const css = document.createElement('style')
+  css.textContent = `
+.lab-tools { position:absolute; left:4.2vw; top:calc(4.2vh + 3.9em); display:flex; gap:0.45em; align-items:center; flex-wrap:wrap; font-size:clamp(11px,0.88vw,16px); pointer-events:auto }
+.lab-tools button, .lab-tools a { font:inherit; color:var(--ink); background:transparent; border:1px solid var(--line); border-radius:999px; padding:0.5em 1.05em; cursor:pointer; text-decoration:none; line-height:1.2; transition:border-color .2s,opacity .2s }
+.lab-tools button:hover, .lab-tools a:hover { border-color:var(--faint) }
+.lab-tools button.primary { background:var(--ink); color:var(--paper); border-color:var(--ink) }
+.lab-tools button.primary:hover { opacity:.82 }
+.lab-tools button.act { background:var(--ink); color:var(--paper); border-color:var(--ink) }
+.lab-tools #labDemoReset { padding:0.5em 0.8em }
+.lab-demo { position:absolute; left:4.2vw; right:calc(5.8vw + clamp(250px,22.5vw,440px)); bottom:calc(4.2vh + 5.8em); width:auto; padding:0.5em 1.3em 0.6em; background:rgba(243,242,238,0.9); border:1px solid var(--line); border-radius:5px; box-shadow:0 8px 34px rgba(30,28,24,0.09); -webkit-backdrop-filter:blur(7px); backdrop-filter:blur(7px); transform:translateY(8px); opacity:0; transition:opacity .35s, transform .35s; text-align:center; pointer-events:none }
+.lab-demo.show { opacity:1; transform:translateY(0) }
+.lab-night .lab-demo { background:rgba(13,14,16,0.88) }
+.lab-demo-meta { display:flex; justify-content:space-between; font-family:var(--mono); font-size:clamp(10px,0.72vw,12px); color:var(--mute); letter-spacing:.06em; margin-bottom:.35em }
+.lab-demo-sub { font-family:var(--serif); font-size:clamp(18px,1.5vw,27px); line-height:1.1; letter-spacing:-.01em }
+.lab-demo-sub b { font-weight:400; display:block }
+.lab-demo-sub span { display:block; font-family:var(--sans); font-size:.54em; color:#585650; line-height:1.4; margin:.3em auto 0; letter-spacing:0 }
+.lab-demo-bar { height:2px; background:var(--line); margin-top:.7em }
+.lab-demo-bar > div { height:100%; width:0; background:var(--ink) }
+.lab-night .lab-demo-sub span { color:#b0ada5 }
+.lab-demo-close { pointer-events:auto; font:inherit; font-size:1em; letter-spacing:.02em; color:var(--ink); background:rgba(255,255,255,.55); border:1px solid var(--faint); border-radius:999px; padding:.15em .7em; min-height:22px; line-height:1.35; cursor:pointer; white-space:nowrap }
+.lab-demo-close:hover, .lab-demo-close:focus-visible { border-color:var(--ink); outline:none }
+.lab-night .lab-demo-close { color:#f1efe9; background:rgba(255,255,255,.08); border-color:#555 }
+.lab-film .lab-tools, .lab-film .lab-demo, .lab-embed .lab-tools { display:none }
+html.demo-on .lab-beat { opacity:0 !important }
+@media (min-width:761px) and (max-width:1080px) {
+  .lab-tools { font-size:11px; gap:0.35em }
+  .lab-tools button, .lab-tools a { padding:0.45em 0.75em }
+  .lab-demo { right:calc(5.8vw + clamp(220px,26vw,300px)) }
+}
+@media (max-width:760px) {
+  .lab-prompt { left:12px; right:12px; top:calc(10px + env(safe-area-inset-top)); max-width:none; padding:0.45em 0.7em; font-size:12px }
+  .lab-tools { left:12px; right:12px; top:calc(50px + env(safe-area-inset-top)); gap:0.35em; flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; padding-bottom:4px; font-size:12px; scrollbar-width:none; -webkit-overflow-scrolling:touch; pointer-events:auto }
+  .lab-tools::-webkit-scrollbar { display:none }
+  .lab-tools > * { flex:0 0 auto; min-height:36px; padding:0.45em 0.8em; white-space:nowrap }
+  .lab-demo { left:12px; right:12px; top:calc(96px + env(safe-area-inset-top)); bottom:auto; width:auto; padding:0.5em 0.8em 0.55em }
+  .lab-demo-sub { font-size:19px }
+  .lab-demo-sub span { font-size:0.56em; line-height:1.35 }
+  .lab-demo-meta { font-size:10px; align-items:center }
+  .lab-demo-close { font-size:11px; min-height:26px; padding:0.15em 0.6em }
+  html.demo-on .lab-demo { top:auto !important; bottom:calc(66px + env(safe-area-inset-bottom)) !important }
+}
+@media (max-width:760px) and (max-height:560px) {
+  .lab-demo { top:calc(94px + env(safe-area-inset-top)); padding:0.25em 0.6em }
+  .lab-demo-sub { display:none }
+  .lab-demo-bar { margin-top:0.35em }
+  html.demo-on .lab-demo { top:auto !important; bottom:calc(66px + env(safe-area-inset-bottom)) !important }
+}
+@media (min-width:761px) and (max-height:560px) {
+  .lab-tools { top:calc(2.4vh + 3.2em); font-size:11px; gap:0.35em }
+  .lab-tools button { padding:0.45em 0.75em }
+  .lab-demo { bottom:calc(2vh + 4.8em) }
+}
+`
+  document.head.appendChild(css)
+
+  const tools = document.createElement('div')
+  tools.className = 'lab-tools on'
+  tools.innerHTML = '<button id="labDemo" class="primary" title="Play / pause / resume the guided demo">&#9654; <span class="lab-demo-label">Play demo</span></button>' +
+    '<button id="labDemoReset" title="Restart the demo" aria-label="Restart the demo">&#8635;</button>' +
+    '<button id="labQuality" title="Cycle render quality (Q)">Quality · High</button>'
+  lab.ui.appendChild(tools)
+
+  const panel = document.createElement('div')
+  panel.className = 'lab-demo'
+  panel.innerHTML = '<div class="lab-demo-meta"><span class="n">01 / 09</span><span class="t">0:00 / 0:52</span>' +
+    '<button type="button" class="lab-demo-close" aria-label="Close demo">&#215; <span>Close demo</span></button></div>' +
+    '<div class="lab-demo-sub"><b></b><span></span></div>' +
+    '<div class="lab-demo-bar"><div></div></div>'
+  lab.ui.appendChild(panel)
+
+  demoUI.btn = tools.querySelector('#labDemo')
+  demoUI.label = demoUI.btn.querySelector('.lab-demo-label')
+  demoUI.reset = tools.querySelector('#labDemoReset')
+  demoUI.quality = tools.querySelector('#labQuality')
+  demoUI.panel = panel
+  demoUI.subB = panel.querySelector('.lab-demo-sub b')
+  demoUI.subS = panel.querySelector('.lab-demo-sub span')
+  demoUI.metaN = panel.querySelector('.lab-demo-meta .n')
+  demoUI.metaT = panel.querySelector('.lab-demo-meta .t')
+  demoUI.bar = panel.querySelector('.lab-demo-bar > div')
+
+  demoUI.btn.addEventListener('click', demoToggle)
+  demoUI.reset.addEventListener('click', () => { demoStop(); demoStart() })
+  panel.querySelector('.lab-demo-close').addEventListener('click', demoStop)
+
+  const QUALITY = ['high', 'balanced', 'lite']
+  const cycleQuality = () => {
+    lab.qualityExplicit = true
+    lab._qualityAuto = false
+    lab.setQuality(QUALITY[(QUALITY.indexOf(lab.quality) + 1) % QUALITY.length])
+  }
+  demoUI.quality.addEventListener('click', cycleQuality)
+  paintQuality()
+  paintPlay()
+
+  addEventListener('keydown', (e) => {
+    if (e.target?.tagName === 'INPUT') return
+    const k = e.key.toLowerCase()
+    if (k === 'd') { e.preventDefault(); demoToggle() }
+    if (k === 'q') { e.preventDefault(); cycleQuality() }
+    if (k === 'escape' && DP.on) { e.preventDefault(); demoStop() }
+  })
 }
 
 </script>
