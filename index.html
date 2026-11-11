@@ -25,7 +25,7 @@
 // kit/template.html (three@0.170.0 from jsDelivr). MIT licence, see LICENSE.
 //
 // What it gives a machine page, so every output has the same polish:
-//   studio      paper or night seamless, softbox environment, soft key shadow, contact shadow, GTAO, bloom, grade
+//   studio      paper or night seamless, softbox environment, PCF soft key shadow, contact shadow, GTAO, opt-in bloom, grade
 //   materials   physically based metals, paints, polymers, glass, all with section caps and wear
 //   geometry    lathe solids, shells, gears, blade rings, pipes, bolt circles, springs, rounded boxes
 //   modes       explode, cutaway (half or quarter, real caps), x-ray, slow motion, labels, break it
@@ -179,7 +179,7 @@ const I18N = {
       ], rows: [
         ['Guided tour', 'The caption moves into the bottom slot for the length of the tour and the readout card steps aside; everything returns afterwards.'],
         ['2D / P&amp;I', 'The readout card is hidden while either drawing is open. Swipe inside the drawing to pan; swipe the top strip sideways to reach the Manual button.'],
-        ['Performance', '<b>Quality · Lite</b> drops post-processing for weaker GPUs, and the 2D / P&amp;I views skip WebGL entirely while still running the solver.'],
+        ['Performance', '<b>Quality · Lite</b> drops ambient occlusion and lowers the render resolution for weaker GPUs, and the 2D / P&amp;I views skip WebGL entirely while still running the solver.'],
         ['Language', '<b>EN / 繁中</b> applies to the UI, the chapter captions and both drawings, and persists in this browser.'],
         ['Accessibility', 'Every control is a real button with an accessible name; this manual traps keyboard focus while open and returns it to the Manual button on close.'],
       ] },
@@ -348,7 +348,7 @@ const I18N = {
       ], rows: [
         ['引導導覽', '導覽期間字幕移至底部位置、讀數卡片讓位；結束後全部復原。'],
         ['2D / P&amp;I', '開啟任一工程圖時隱藏讀數卡片。在圖內滑動可平移；橫向滑動頂部工具列可找到「手冊」按鈕。'],
-        ['效能', '<b>畫質 · 輕量</b> 會關閉後處理以因應較弱的 GPU；二維與 P&amp;I 視圖完全跳過 WebGL，求解器仍持續運算。'],
+        ['效能', '<b>畫質 · 輕量</b> 會關閉環境光遮蔽並降低渲染解析度以因應較弱的 GPU；二維與 P&amp;I 視圖完全跳過 WebGL，求解器仍持續運算。'],
         ['語言', '<b>EN / 繁中</b> 同時套用至介面、導覽字幕與兩張工程圖，並儲存在此瀏覽器。'],
         ['無障礙', '每個控制項都是具有可讀名稱的實體按鈕；本手冊開啟時會鎖定鍵盤焦點，關閉後焦點回到「手冊」按鈕。'],
       ] },
@@ -1194,12 +1194,20 @@ export class Lab {
   _initGL() {
     const ss = Number(this.q.get('ss') || 1)
     const r = new THREE.WebGLRenderer({ antialias: false, alpha: false, powerPreference: 'high-performance', preserveDrawingBuffer: this.filmMode })
-    r.setPixelRatio(this.filmMode ? ss : Math.min(devicePixelRatio, 2))
+    // BLACK-TILE FIX. Post-processing ends with full-screen quads; any screen
+    // region a driver leaves unresolved used to keep WebGL's default clear
+    // colour (pure black). Clear to the paper backdrop instead, so a dropped
+    // tile can never read as a black square block again.
+    r.setClearColor(new THREE.Color(this.o.bg ?? (this.theme === 'paper' ? 0xf3f2ee : 0x0d0e10)), 1)
+    r.setPixelRatio(1) // setQuality() sets the real DPR once the composer exists
     r.setSize(innerWidth, innerHeight)
     r.toneMapping = THREE.NoToneMapping // OutputPass applies it
     r.toneMappingExposure = this.o.exposure ?? 1
     r.shadowMap.enabled = true
-    r.shadowMap.type = THREE.VSMShadowMap
+    // VSM's separable blur can yield a negative variance, i.e. sqrt(NaN) in
+    // the shadow map, which paints pure-black square blocks on lit surfaces.
+    // PCFSoft keeps the soft contact shadows with no blur render target.
+    r.shadowMap.type = THREE.PCFSoftShadowMap
     r.localClippingEnabled = true
     r.domElement.id = 'lab-gl'
     r.domElement.tabIndex = 0
@@ -1222,6 +1230,12 @@ export class Lab {
     const size = r.getDrawingBufferSize(new THREE.Vector2())
     const rt = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: 4 })
     const comp = new EffectComposer(r, rt)
+    // EffectComposer keeps renderer.getPixelRatio() even when handed an explicit
+    // render target, and setSize() multiplies by it again. Pin it to 1 so the
+    // HDR targets are always driven by the exact integer drawing-buffer size.
+    // A DPR-scaled / fractional multisampled half-float target is the main
+    // cause of the black square tiles seen at High and Balanced on some GPUs.
+    comp.setPixelRatio(1)
     comp.addPass(new RenderPass(this.scene, this.camera))
     const ao = new GTAOPass(this.scene, this.camera, size.x, size.y)
     ao.blendIntensity = this.theme === 'paper' ? 0.85 : 1
@@ -1255,8 +1269,21 @@ export class Lab {
   _resize() {
     const w = innerWidth, h = innerHeight
     this.camera.aspect = w / h; this.camera.updateProjectionMatrix()
-    this.renderer.setSize(w, h); this.composer.setSize(w, h)
+    this.renderer.setSize(w, h)
     const s = this.renderer.getDrawingBufferSize(new THREE.Vector2())
+    // Always feed the composer the EXACT integer drawing-buffer size. Passing
+    // CSS pixels while a fractional DPR was active created 1500 x 937.5 style
+    // MSAA targets that some drivers resolve as black tiles.
+    this.composer.setSize(s.x, s.y)
+    // Very large displays (4K / HiDPI) cannot afford 4x MSAA on two half-float
+    // HDR targets. Drop the sample count there instead of risking an incomplete
+    // multisample resolve; the dense pixel grid keeps edges smooth on its own.
+    const want = s.x * s.y > 2_400_000 ? 0 : Math.min(4, this.renderer.capabilities.maxSamples ?? 4)
+    const a = this.composer.renderTarget1, b = this.composer.renderTarget2
+    if (a.samples !== want) {
+      a.samples = b.samples = want
+      a.dispose(); b.dispose()
+    }
     this.ao.setSize(s.x, s.y); this.grade.uniforms.uRes.value.set(s.x, s.y)
     this._frame()
   }
@@ -1276,23 +1303,34 @@ export class Lab {
     this.camera.updateProjectionMatrix()
   }
   /**
-   * Render quality. The scene is drawn several times per frame (contact shadow, VSM shadow,
-   * GTAO depth/normal, main pass) so these switches are the difference between 20 and 60 fps.
-   *   high     2x DPR cap, 4x MSAA, GTAO, bloom, 2048 shadow, contact shadow every frame
-   *   balanced 1.25x DPR cap, no GTAO, bloom, 1024 shadow, contact shadow every 2nd frame
-   *   lite     1x DPR, no GTAO or bloom, 1024 shadow, contact shadow every 6th frame
-   * Also available as ?quality=balanced or ?quality=lite.
+   * Render quality. The scene is drawn several times per frame (contact shadow,
+   * PCF soft shadow, GTAO depth/normal, main pass), so these switches are the
+   * difference between 20 and 60 fps.
+   *   high     integer DPR (pixel-budget capped), 4x MSAA, GTAO, 2048 shadow, contact shadow every frame
+   *   balanced integer DPR (pixel-budget capped), 4x MSAA, 1024 shadow, contact shadow every 2nd frame
+   *   lite     1x DPR, no GTAO, 1024 shadow, contact shadow every 6th frame
+   * Bloom is opt-in via ?bloom=1. Also available as ?quality=balanced|lite.
    */
   setQuality(level) {
     if (!['high', 'balanced', 'lite'].includes(level)) level = 'high'
     this.quality = level
-    const r = this.renderer, comp = this.composer
-    const cap = level === 'high' ? 2 : level === 'balanced' ? 1.25 : 1
-    const dpr = this.filmMode ? Number(this.q.get('ss') || 1) : Math.min(devicePixelRatio || 1, cap)
-    r.setPixelRatio(dpr); comp.setPixelRatio(dpr)
+    const r = this.renderer
+    // Integer DPR + a hard pixel budget. The old 2x / 1.25x caps allocated
+    // multi-megapixel, sometimes FRACTIONAL, half-float MSAA buffers on HiDPI
+    // screens; those are exactly what resolve as black square blocks on some
+    // drivers at High and Balanced (Lite used 1x and stayed clean).
+    const cap = level === 'high' ? 2 : level === 'balanced' ? 1.5 : 1
+    const raw = this.filmMode ? Number(this.q.get('ss') || 1) : Math.min(devicePixelRatio || 1, cap)
+    let dpr = Math.max(1, Math.floor(raw))
+    while (dpr > 1 && innerWidth * innerHeight * dpr * dpr > 2_400_000) dpr--
+    r.setPixelRatio(dpr)
     this._resize()
     this.ao.enabled = level === 'high'
-    this.bloom.enabled = level !== 'lite'
+    // UnrealBloomPass composites additively BACK into the multisampled HDR
+    // buffer; that resolve is the other known source of black tiles. On this
+    // paper set the effect is tiny (threshold 1.6), so leave it off unless a
+    // user explicitly opts back in with ?bloom=1 on known-good hardware.
+    this.bloom.enabled = this.q.get('bloom') === '1'
     const S = level === 'high' ? 2048 : 1024
     const sh = this.key.shadow
     if (sh.mapSize.x !== S) {
@@ -1334,10 +1372,12 @@ export class Lab {
     const floor = new THREE.Mesh(new THREE.CircleGeometry(40, 96), fm)
     floor.rotation.x = -Math.PI / 2; floor.position.y = gy; floor.receiveShadow = true; floor.userData.studio = true
     this.scene.add(floor); this.floor = floor
-    // lights: soft key with VSM shadow, cool rim, gentle fill (the environment does most of the work)
+    // lights: soft key with PCF soft shadow, cool rim, gentle fill (the environment does most of the work)
     const key = new THREE.DirectionalLight(0xfff3e6, paper ? 2.4 : 2.6)
     key.position.set(-3.2, 6.5, 4.2); key.castShadow = true
-    key.shadow.mapSize.set(2048, 2048); key.shadow.radius = 7; key.shadow.blurSamples = 16
+    key.shadow.mapSize.set(2048, 2048)
+    // PCFSoft has no blur pass: radius / blurSamples belonged to VSM and the
+    // VSM variance blur was the source of NaN -> pure-black square blocks.
     key.shadow.bias = -0.0004; key.shadow.normalBias = 0.02
     const sc = key.shadow.camera; sc.left = -3.2; sc.right = 3.2; sc.top = 3.2; sc.bottom = -3.2; sc.near = 0.5; sc.far = 20
     this.scene.add(key, key.target); this.key = key
