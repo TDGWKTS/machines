@@ -2207,107 +2207,334 @@ lab.mesh(GEO.pipe([[-0.4, VY0 - 0.05, 0], [-0.4, 0.55, 0], [0.4, 0.5, 0.6], [1.6
 }
 
 // ------------------------------------------------------------------ tapered outlet transition (photo)
-// The vessel's +X end is not a flat face with a round duct: top and bottom panels
-// slope inward (truncated-pyramid style) to a round throat that feeds the ID fan
-// axially. Flat rotated panels only — folded FRP plate, like the real transition.
+// The vessel's +X end (a 2.6 m × 2.4 m rectangle) necks down to the round throat
+// that feeds the ID fan. Built as ONE closed square→round loft so every corner is
+// sealed — the old version left the four folded FRP panels open at the edges.
+// closed loft between two equal-length cross-sections (arrays of [y, z] points)
+function loft2D(x0, x1, sec0, sec1, cy, cz, rows = 14) {
+  const N = sec0.length
+  const pos = [], idx = []
+  for (let i = 0; i <= rows; i++) {
+    const t = i / rows, x = x0 + (x1 - x0) * t
+    for (let j = 0; j < N; j++) pos.push(x, cy + lerp(sec0[j][0], sec1[j][0], t), cz + lerp(sec0[j][1], sec1[j][1], t))
+  }
+  for (let i = 0; i < rows; i++) for (let j = 0; j < N; j++) {
+    const a = i * N + j, b = i * N + ((j + 1) % N), c = (i + 1) * N + j, d = (i + 1) * N + ((j + 1) % N)
+    idx.push(a, c, b, b, c, d)
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setIndex(idx); g.computeVertexNormals(); return g
+}
+// perimeter of a rectangle with chamfered TOP corners → matches the vessel face
+function periRect(hz, hyB, hyT, chz, chy) {
+  const pts = []
+  const edge = (p, q, n) => { for (let i = 1; i <= n; i++) { const t = i / n; pts.push([lerp(p[0], q[0], t), lerp(p[1], q[1], t)]) } }
+  const A = [-hz, -hyB], B = [hz, -hyB], C = [hz, hyT], D = [hz - chz, hyT + chy], E = [-hz + chz, hyT + chy], F = [-hz, hyT]
+  edge(A, B, 12); edge(B, C, 12); edge(C, D, 3); edge(D, E, 12); edge(E, F, 3); edge(F, A, 12)
+  return pts
+}
 const taper = new THREE.Group()
 {
-  const topP = new THREE.Mesh(GEO.rbox(1.02, 0.05, 1.9, 0.01), frp); topP.rotation.z = -0.472; topP.position.set(4.05, 3.28, 0); taper.add(topP)
-  const botP = new THREE.Mesh(GEO.rbox(1.02, 0.05, 1.9, 0.01), frp); botP.rotation.z = 0.472; botP.position.set(4.05, 1.22, 0); taper.add(botP)
-  for (const sd of [-1, 1]) {
-    const sideP = new THREE.Mesh(GEO.rbox(1.0, 2.0, 0.05, 0.01), frp); sideP.rotation.y = sd * 0.428; sideP.position.set(4.05, 2.25, sd * 0.955); taper.add(sideP)
-  }
-  const throat = new THREE.Mesh(GEO.tube(0.78, 0.72, 0.36, 48), frp); throat.rotation.z = T2R; throat.position.set(4.68, 2.3, 0); taper.add(throat)
-  const fl = new THREE.Mesh(GEO.tube(0.86, 0.74, 0.08, 48), frpDark); fl.rotation.z = T2R; fl.position.set(4.9, 2.3, 0); taper.add(fl)
-  const fb = new THREE.Mesh(GEO.bolts(12, 0.81, 0.016, 0.03, {}), steelM); fb.rotation.z = T2R; fb.position.set(4.96, 2.3, 0); taper.add(fb)
-  const sp = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.28, 20), steelM); sp.position.set(4.68, 3.2, 0); taper.add(sp)
-  const spc = new THREE.Mesh(GEO.disc(0.07, 0.03, 0.005, 20), steelM); spc.position.set(4.68, 3.36, 0); taper.add(spc)
+  const _sec0 = periRect(1.2, 1.27, 0.84, 0.3, 0.43)   // vessel +X face: y 0.99→3.1 flat, chamfer → 3.53
+  // Each circle point keeps the POLAR ANGLE of its matching rectangle point.
+  // A plain uniform sweep twists the loft (the flat front panel spiralled round
+  // to the back of the throat); this mapping keeps it square→round, untwisted,
+  // so the broad front panel really is the surface the access hatch sits on.
+  const _sec1 = _sec0.map(([py, pz]) => { const a = Math.atan2(pz, py); return [0.75 * Math.cos(a), 0.75 * Math.sin(a)] })
+  taper.add(new THREE.Mesh(loft2D(3.5, 4.66, _sec0, _sec1, 2.26, 0, 16), frp))   // embedded 0.08 inside the vessel wall
+  // -T2R aligns these +Y lathe parts with the fan's +X inlet axis; the hex bolt
+  // heads therefore face outboard toward the fan instead of back into the taper.
+  const throat = new THREE.Mesh(GEO.tube(0.78, 0.72, 0.36, 48), frp); throat.rotation.z = -T2R; throat.position.set(4.68, 2.3, 0); taper.add(throat)
+  const fl = new THREE.Mesh(GEO.tube(0.86, 0.74, 0.08, 48), frpDark); fl.rotation.z = -T2R; fl.position.set(4.9, 2.3, 0); taper.add(fl)
+  const fb = new THREE.Mesh(GEO.bolts(12, 0.81, 0.016, 0.03, {}), steelM); fb.rotation.z = -T2R; fb.position.set(4.96, 2.3, 0); taper.add(fb)
 }
-lab.add(taper, { name: 'Tapered outlet transition', explode: [0.5, 0, 0], label: 'Tapered outlet', at: [4.05, 3.62, 0.9], value: () => 'box \u2192 round \u00b7 feeds the ID fan', count: 8 })
+lab.add(taper, { name: 'Tapered outlet transition', explode: [0.5, 0, 0], label: 'Tapered outlet (square\u2192round)', at: [4.05, 3.4, 0.9], value: () => 'vessel end \u2192 round throat \u00b7 feeds the ID fan', count: 9 })
 
-// ------------------------------------------------------------------ the ID fan (photos, v2)
-// Rebuilt from the five new photos: volute and blue motor share ONE low, wide
-// fabricated steel base frame on the raised plinth. Gas enters the volute eye
-// axially from the taper (axis X); the volute's front side plate faces +Z and
-// the blue TEFC motor is DIRECT-COUPLED on it (axis along Z, pointing at the
-// operator), feet bolted to low rails of the shared frame — no tall pedestal.
-// One continuous shaft runs from the impeller hub through a flexible coupling
-// (with an open cage guard) into the motor's drive-end bearing: no gaps.
-// A rectangular cradle frame stands around the casing; discharge leaves the
-// volute top rear through a short upstand.
+// ------------------------------------------------------------------ the ID fan (photos): belt-driven snail-shell blower
+// AXIS CONVENTION (site photo, arrows): BOTH the volute shaft and the motor shaft
+// run along +X, the machine's long direction. The taper's round throat therefore
+// feeds the fan AXIALLY from -X. The V-belt loop lies in the vertical Y-Z plane at
+// x = BX, so each shaft is PERPENDICULAR to the belt plane and parallel to the
+// other. The blue motor sits toward the near side (+Z) so the volute no longer
+// hides it. SAFETY: the belt drive is a SEALED capsule - solid face plate, full
+// perimeter skirt and solid back plate - and both shafts run inside solid
+// tunnels. No belt or rotating shaft is visible from any outside view; the
+// internals stay in the model for mechanical accuracy but are fully covered.
+// The cover is a TAPERED capsule: its lower tip stops at the MOTOR SHAFT instead
+// of hanging down to the base frame, and the volute-to-belt gap is now a SHORT
+// (0.20 m) solid shaft tunnel so the drive reads as close-coupled.
+// Site photos 072858 / 072916: the cover carries a round BLACK maintenance
+// opening (a real recessed hole with a dark liner), and the volute is a TWO-PIECE
+// bolted casing of two EQUAL-WIDTH halves. The only joint is a circumferential
+// split flange with a yellow bolt ring at the drum MIDPOINT; the flat drive-side
+// FACE is completely plain (no seam, no bolts). Its round bolted hatch is on the
+// CURVED casing at the upper-left, NOT on the flat drive-side face.
+// GEO.tube / GEO.disc are lathes around +Y; rz = -T2R turns that axis to +X.
 const fan = new THREE.Group()
 {
   const put = (geo, mat, x, y, z, rx = 0, ry = 0, rz = 0) => { const m = new THREE.Mesh(geo, mat); m.rotation.set(rx, ry, rz); m.position.set(x, y, z); fan.add(m); return m }
-  for (const rz of [-0.5, 1.2]) put(GEO.rbox(3.3, 0.2, 0.18, 0.01), galvM, 5.85, 0.65, rz)
-  for (const cx of [4.45, 5.85, 7.25]) put(GEO.rbox(0.18, 0.2, 2.9, 0.01), galvM, cx, 0.65, 0.35)
-  put(GEO.tube(0.66, 0.6, 0.44, 48), galvM, 5.12, 2.3, 0.05, 0, 0, T2R)
-  put(GEO.tube(1.13, 1.05, 0.6, 64), voluteM, 5.85, 2.3, 0.2, T2R)
-  put(GEO.disc(1.13, 0.06, 0.02, 64), voluteM, 5.85, 2.3, -0.12, T2R)
-  put(GEO.disc(1.13, 0.06, 0.02, 64), voluteM, 5.85, 2.3, 0.52, T2R)
-  put(GEO.rbox(0.9, 0.5, 0.28, 0.01), darkSteel, 5.85, 1.0, -0.15)
-  put(GEO.rbox(0.9, 0.5, 0.28, 0.01), darkSteel, 5.85, 1.0, 0.55)
-  put(GEO.rbox(0.7, 1.0, 0.8, 0.02), voluteM, 6.2, 3.75, -0.15)
-  put(GEO.rbox(0.85, 0.06, 0.95, 0.01), galvM, 6.2, 4.28, -0.15)
-  for (const fx of [4.6, 7.1]) for (const fz of [-0.5, 0.9]) put(GEO.rbox(0.09, 2.95, 0.09, 0.01), galvM, fx, 2.22, fz)
-  for (const fz of [-0.5, 0.9]) put(GEO.rbox(2.6, 0.09, 0.09, 0.01), galvM, 5.85, 3.72, fz)
-  put(GEO.rbox(0.09, 0.09, 1.5, 0.01), galvM, 7.1, 3.72, 0.2)
-  put(GEO.disc(0.26, 0.05, 0.01, 48), voluteM, 5.45, 2.72, 0.56, T2R)
-  const yb = new THREE.Mesh(GEO.bolts(8, 0.2, 0.016, 0.03, {}), yellowM); yb.rotation.x = T2R; yb.position.set(5.45, 2.72, 0.59); fan.add(yb)
-  // ---- drive train -------------------------------------------------------
-  // The impeller, shaft, coupling and motor share ONE axis: x = 5.85, y = 2.3,
-  // running along +Z out of the volute's front side plate. The shaft used to be
-  // a 0.35 m floating stub with a 45 mm gap at the fan hub and a 10 mm gap at
-  // the motor flange, so the motor read as disconnected. It is now ONE solid
-  // shaft from inside the volute (z = 0.46) to inside the drive-end bearing
-  // (z = 1.07), with a real flexible coupling and an open coupling guard.
-  const AX = [5.85, 2.3]
-  put(GEO.disc(0.17, 0.14, 0.02, 32), darkSteel, AX[0], AX[1], 0.60, T2R)      // bearing boss on the side plate: 0.53 .. 0.67
-  put(GEO.disc(0.105, 0.05, 0.008, 32), galvM, AX[0], AX[1], 0.685, T2R)        // shaft seal: 0.66 .. 0.71
-  put(GEO.disc(0.055, 0.61, 0.008, 24), steelM, AX[0], AX[1], 0.765, T2R)       // CONTINUOUS shaft: 0.46 .. 1.07
-  // flexible coupling: fan half, elastomeric spider, motor half
-  put(GEO.disc(0.125, 0.10, 0.012, 32), steelM, AX[0], AX[1], 0.775, T2R)       // 0.725 .. 0.825
-  put(GEO.disc(0.098, 0.07, 0.010, 32), darkSteel, AX[0], AX[1], 0.86, T2R)     // 0.825 .. 0.895
-  put(GEO.disc(0.125, 0.10, 0.012, 32), steelM, AX[0], AX[1], 0.945, T2R)       // 0.895 .. 0.995
-  for (const cz of [0.825, 0.995]) {
-    const cb = new THREE.Mesh(GEO.bolts(6, 0.098, 0.012, 0.022, {}), steelM)
-    cb.rotation.x = T2R; cb.position.set(AX[0], AX[1], cz); fan.add(cb)
+  const putX = (geo, mat, x, y, z) => put(geo, mat, x, y, z, 0, 0, -T2R)
+  const guardBoltM = MAT.paint({ color: [0.94, 0.76, 0.12], roughness: 0.45, clearcoat: 0.15 })
+  const guardHoleM = MAT.paint({ color: [0.022, 0.025, 0.03], roughness: 0.94, clearcoat: 0 })
+  const VY = 2.3, VZ = 0                    // volute / blower shaft centre (y, z)
+  const BX = 6.52                          // belt plane: constant x, close to the volute
+  const BR = 0.34, MRp = 0.17              // blower pulley / motor pulley radius
+  const MY = 1.22, MZ = 1.24               // motor shaft centre: near side (+Z), clear of the volute
+  const MR = 0.26, MXc = 5.84, ML = 0.86   // motor radius, body centre x, length
+  // Tapered capsule: a wide semicircle around the big volute pulley joined by
+  // straight sides to a narrow semicircle around the small motor pulley. Its
+  // lower (+ly) tip ends just past the motor shaft - NOT at the base frame.
+  const GSPAN = Math.hypot(MY - VY, MZ - VZ)
+  const GROT = Math.atan2(MZ - VZ, MY - VY)
+  const GCY = (VY + MY) / 2, GCZ = (VZ + MZ) / 2
+  const PV = -GSPAN / 2, PM = GSPAN / 2     // pulley centres along the belt line
+  const RV = 0.46, RM = 0.29                // volute-end / motor-end cap radii
+  const GX = 6.76, GBACK = 6.34            // face plate / solid back plate x
+  // local capsule coords (ly along the belt line, lz across it) -> global (y, z)
+  const gp = (ly, lz) => [GCY + ly * Math.cos(GROT) + lz * Math.sin(GROT), GCZ + ly * Math.sin(GROT) - lz * Math.cos(GROT)]
+  // ---- shared base frame ---------------------------------------------------
+  for (const fz of [-0.85, 0.85]) put(GEO.rbox(3.6, 0.2, 0.18, 0.01), galvM, 5.85, 0.65, fz)
+  put(GEO.rbox(2.0, 0.2, 0.18, 0.01), galvM, 6.05, 0.65, MZ)        // rail under the relocated motor
+  for (const cx of [4.5, 5.85, 7.2]) put(GEO.rbox(0.18, 0.2, 1.9, 0.01), galvM, cx, 0.65, 0)
+  for (const cx of [5.45, 6.65]) put(GEO.rbox(0.14, 0.16, MZ - 0.85 + 0.2, 0.01), galvM, cx, 0.65, (MZ + 0.85) / 2)
+  put(GEO.rbox(1.45, 0.12, 1.0, 0.01), galvM, 6.05, 0.80, MZ)      // motor mounting plate
+  // ---- volute: axis +X, TWO EQUAL bolted halves -----------------------------
+  // The drive-side FACE is a PLAIN flat surface: no seam, no yellow bolts
+  // (site photo 072916). The two-part split is shown ONLY by the circumferential
+  // flange with a yellow bolt ring around the drum, at the drum MIDPOINT so both
+  // halves are the same thickness. The inlet connector duct was shortened and
+  // given a thinner wall so the drum could be deepened toward -X.
+  const VDRUM0 = 5.25, VDRUM1 = 6.15
+  const VDRUMC = (VDRUM0 + VDRUM1) / 2, VDRUML = VDRUM1 - VDRUM0       // 5.70, 0.90
+  const drum = putX(GEO.tube(1.13, 1.05, VDRUML, 64), voluteM, VDRUMC, VY, VZ)  // two 0.45 m halves
+  drum.name = 'Volute drum (two equal halves)'
+  putX(GEO.tube(1.13, 0.78, 0.06, 64), voluteM, VDRUM0 - 0.03, VY, VZ) // -X annular INLET eye
+  const flatFace = putX(GEO.disc(1.13, 0.06, 0.02, 64), voluteM, 6.16, VY, VZ)  // +X drive-side plate: PLAIN
+  flatFace.name = 'Plain flat drive-side volute face'
+  // circumferential split flange + yellow bolt ring at the MIDPOINT
+  const splitX = VDRUMC
+  const splitFlange = putX(GEO.tube(1.175, 1.115, 0.055, 64), frpDark, splitX, VY, VZ)
+  splitFlange.name = 'Circumferential split flange (equal halves)'
+  // bolt radius 1.12 < the 1.13 plate radius, so from the drive end the flat
+  // face stays completely plain; the bolts read only from side / 3q views
+  const splitBolts = putX(GEO.bolts(16, 1.12, 0.017, 0.026, {}), guardBoltM, splitX + 0.026, VY, VZ)
+  splitBolts.name = 'Split flange yellow bolts'
+  // round bolted maintenance hatch on the CURVED casing, upper-left, wholly
+  // inside the +X half so it never intersects the central split flange.
+  // rx = vHatchAng turns the +Y lathe axis into the local radial normal.
+  const vHatchAng = 0.85                         // radians from +Y toward +Z
+  const vHatchRad = 1.145                        // just proud of the 1.13 casing
+  const vHy = VY + vHatchRad * Math.cos(vHatchAng)
+  const vHz = VZ + vHatchRad * Math.sin(vHatchAng)
+  const vHatchX = 5.95
+  const vHatch = put(GEO.disc(0.19, 0.025, 0.008, 40), frpDark, vHatchX, vHy, vHz, vHatchAng)
+  vHatch.name = 'Volute casing maintenance hatch'
+  const vHatchBolts = put(GEO.bolts(8, 0.15, 0.015, 0.026, {}), darkSteel, vHatchX, vHy, vHz, vHatchAng)
+  vHatchBolts.name = 'Volute casing hatch bolts'
+  // SHORT / THIN inlet connector: 0.33 m instead of 0.56 m, wall 0.07 instead
+  // of 0.08, freeing the space that the deeper equal-halves drum now occupies.
+  const VDUCT0 = 4.94, VDUCT1 = VDRUM0 + 0.02
+  const inletDuct = putX(GEO.tube(0.82, 0.75, VDUCT1 - VDUCT0, 48), frp, (VDUCT0 + VDUCT1) / 2, VY, VZ)
+  inletDuct.name = 'Short thin volute inlet connector'
+  putX(GEO.tube(0.88, 0.76, 0.08, 48), frpDark, 5.02, VY, VZ)        // bolted inlet flange
+  put(GEO.rotor({ count: 14, axis: 'x', r0: 0.14, r1: 0.95, chord: [0.34, 0.22], thick: 0.05, camber: 0.05, twist: 0.5 }), darkSteel, VDRUMC, VY, VZ)
+  // cradle + tangential discharge upstand: centred on the deeper equal-halves drum
+  for (const cz of [-0.6, 0.6]) put(GEO.rbox(0.7, 0.5, 0.28, 0.01), darkSteel, VDRUMC, 1.0, cz)
+  put(GEO.rbox(0.9, 1.0, 1.0, 0.02), voluteM, VDRUMC, 3.72, 0)
+  put(GEO.rbox(1.05, 0.06, 1.15, 0.01), galvM, VDRUMC, 4.25, 0)
+  for (const fx of [4.55, 7.15]) for (const fz of [-0.95, 0.95]) put(GEO.rbox(0.09, 2.95, 0.09, 0.01), galvM, fx, 2.22, fz)
+  for (const fz of [-0.95, 0.95]) put(GEO.rbox(2.6, 0.09, 0.09, 0.01), galvM, 5.85, 3.72, fz)
+  // ---- blower shaft + large pulley: both in the Y-Z belt plane at x=BX ------
+  // CLOSE-COUPLED: only a short SOLID tunnel (0.18 m) now bridges the volute
+  // drive-side plate and the sealed capsule. It reads as a bearing housing,
+  // never as an exposed rotating shaft.
+  putX(GEO.disc(0.17, 0.14, 0.02, 32), darkSteel, 6.22, VY, VZ)              // bearing boss (inside tunnel)
+  putX(GEO.disc(0.055, 0.36, 0.008, 24), steelM, 6.36, VY, VZ)               // shaft (inside tunnel)
+  const shaftGuard = putX(GEO.disc(0.175, GBACK - 6.16 + 0.02, 0.012, 40), voluteM, (6.16 + GBACK) / 2, VY, VZ) // short SOLID shaft guard
+  shaftGuard.name = 'Solid blower shaft guard'
+  putX(GEO.disc(0.215, 0.05, 0.008, 40), galvM, 6.20, VY, VZ)                // tunnel flange at the volute
+  putX(GEO.disc(0.215, 0.05, 0.008, 40), galvM, GBACK - 0.02, VY, VZ)        // tunnel flange at the guard
+  putX(GEO.disc(BR, 0.08, 0.012, 48), steelM, BX, VY, VZ)                     // blower drive pulley (inside capsule)
+  putX(GEO.disc(0.12, 0.09, 0.014, 32), darkSteel, BX + 0.05, VY, VZ)         // pulley hub (inside capsule)
+  // ---- blue TEFC motor: body axis +X, drive end at the belt plane ----------
+  // Its shaft is PARALLEL to the blower shaft (both +X) and therefore at 90 deg
+  // to the belt plane. The motor is on the near side (+Z), in front of the
+  // volute, so the whole finned blue body reads clearly in the default view.
+  putX(GEO.disc(MR, ML, 0.02, 48), motorBlueM, MXc, MY, MZ)                    // finned body (axis X)
+  putX(GEO.disc(0.30, 0.06, 0.01, 48), motorBlueM, MXc + ML / 2, MY, MZ)       // drive-end flange (+X)
+  const cowlX = MXc - ML / 2 - 0.08
+  putX(GEO.disc(0.28, 0.16, 0.01, 48), motorBlueM, cowlX, MY, MZ)      // non-drive fan cowl
+  // concentric cooling-fan grille on the outboard (-X) face, as in the site photo
+  for (let i = 1; i <= 7; i++) {
+    const r = 0.036 + i * 0.031
+    putX(GEO.tube(r + 0.008, r, 0.012, 48), darkSteel, cowlX - 0.086, MY, MZ)
   }
-  // open cage guard: two end rings + six bars, so the coupled shaft stays visible
-  for (const gz of [0.715, 1.005]) put(GEO.tube(0.205, 0.19, 0.03, 32), galvM, AX[0], AX[1], gz, T2R)
-  for (let i = 0; i < 6; i++) {
-    const a = (i / 6) * Math.PI * 2
-    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.011, 0.29, 8), galvM)
-    bar.rotation.x = T2R; bar.position.set(AX[0] + 0.198 * Math.cos(a), AX[1] + 0.198 * Math.sin(a), 0.86)
-    fan.add(bar)
+  putX(GEO.disc(0.045, 0.014, 0.004, 24), motorBlueM, cowlX - 0.090, MY, MZ)
+  put(GEO.rbox(0.42, 0.22, 0.30, 0.02), motorBlueM, MXc + 0.36, MY + 0.28, MZ) // terminal box on top
+  for (const gx of [MXc + 0.06, MXc + 0.30]) put(GEO.disc(0.045, 0.02, 0.004, 20), darkSteel, gx, MY + 0.28, MZ + 0.16, T2R) // cable glands face +Z
+  // longitudinal cooling fins around the X-axis body
+  const finGeo = []
+  for (let i = 0; i < 26; i++) {
+    const th = (i / 26) * Math.PI * 2
+    if (Math.cos(th) < -0.55) continue
+    const fg = new THREE.BoxGeometry(ML - 0.12, 0.012, 0.04)
+    fg.rotateX(th); fg.translate(MXc, MY + (MR + 0.02) * Math.cos(th), MZ + (MR + 0.02) * Math.sin(th)); finGeo.push(fg)
   }
-  put(GEO.disc(0.35, 0.05, 0.01, 48), motorBlueM, 5.85, 2.3, 1.06, T2R)         // drive-end flange: shaft ends inside it
-  put(GEO.disc(0.34, 0.95, 0.03, 48), motorBlueM, 5.85, 2.3, 1.56, T2R)
-  const finGeos = []
-  for (let i = 0; i < 28; i++) {
-    const th = (i / 28) * Math.PI * 2
-    if (Math.sin(th) < -0.72) continue
-    const fg = new THREE.BoxGeometry(0.05, 0.012, 0.88)
-    fg.rotateZ(th); fg.translate(5.85 + 0.355 * Math.cos(th), 2.3 + 0.355 * Math.sin(th), 1.56); finGeos.push(fg)
+  fan.add(new THREE.Mesh(GEO.merge(finGeo), motorBlueM))
+  for (const fx of [MXc - 0.34, MXc + 0.34]) put(GEO.rbox(0.30, 0.12, 0.62, 0.01), darkSteel, fx, MY - MR - 0.06, MZ) // feet
+  putX(GEO.disc(0.05, 0.25, 0.006, 24), steelM, 6.395, MY, MZ)                // motor shaft (inside capsule)
+  putX(GEO.disc(0.145, 0.14, 0.008, 32), galvM, 6.32, MY, MZ)                 // solid collar seals the motor shaft
+  putX(GEO.disc(MRp, 0.07, 0.012, 40), steelM, BX, MY, MZ)                     // motor pulley (inside capsule)
+  putX(GEO.disc(0.09, 0.08, 0.014, 24), darkSteel, BX + 0.04, MY, MZ)          // hub (inside capsule)
+  // ---- V-belt loop in the Y-Z plane at x = BX -------------------------------
+  // 2-D belt coordinates are [u = z, v = y]. Both +X shafts pierce this plane
+  // at right angles, so the loop wraps the two pulleys in Y-Z. It is kept for
+  // mechanical accuracy but is COMPLETELY hidden inside the sealed capsule.
+  const arcPts = (cu, cv, r, Ps, Pe, fu, fv, seg, pts) => {
+    const a0 = Math.atan2(Ps[1] - cv, Ps[0] - cu)
+    let a1 = Math.atan2(Pe[1] - cv, Pe[0] - cu)
+    const af = Math.atan2(fv, fu)
+    let d = a1 - a0; while (d <= -Math.PI) d += 2 * Math.PI; while (d > Math.PI) d -= 2 * Math.PI
+    const norm = (a) => { while (a <= -Math.PI) a += 2 * Math.PI; while (a > Math.PI) a -= 2 * Math.PI; return a }
+    const err = (m) => { const e = Math.abs(norm(m - af)); return e > Math.PI ? 2 * Math.PI - e : e }
+    const dir = err(a0 + d / 2) <= err(a0 - d / 2) ? 1 : -1
+    for (let i = 1; i <= seg; i++) { const a = a0 + dir * d * (i / seg); pts.push([BX, cv + r * Math.sin(a), cu + r * Math.cos(a)]) }
   }
-  fan.add(new THREE.Mesh(GEO.merge(finGeos), motorBlueM))
-  put(GEO.disc(0.3, 0.14, 0.02, 48), motorBlueM, 5.85, 2.3, 2.1, T2R)
-  for (const fz of [1.28, 1.84]) {
-    put(GEO.rbox(1.3, 0.14, 0.3, 0.01), darkSteel, 5.85, 0.82, fz)
-    put(GEO.rbox(1.1, 1.05, 0.26, 0.01), darkSteel, 5.85, 1.415, fz)
-    put(GEO.rbox(0.92, 0.1, 0.24, 0.01), motorBlueM, 5.85, 1.99, fz)
-    put(GEO.rbox(0.34, 0.14, 0.2, 0.01), motorBlueM, 5.85, 2.08, fz)
-    for (const bx of [5.5, 6.2]) { const fb2 = new THREE.Mesh(new THREE.CylinderGeometry(0.016, 0.016, 0.035, 6), steelM); fb2.position.set(bx, 2.055, fz); fan.add(fb2) }
+  const beltLoop = (au, av, ar, bu, bv, br) => {
+    const du = bu - au, dv = bv - av, D = Math.hypot(du, dv)
+    const uu = du / D, vv = dv / D, pu = -vv, pv = uu
+    const c = (br - ar) / D, s = Math.sqrt(Math.max(0, 1 - c * c))
+    const n1 = [c * uu - s * pu, c * vv - s * pv], n2 = [c * uu + s * pu, c * vv + s * pv]
+    const A1 = [au + ar * n1[0], av + ar * n1[1]], B1 = [bu + br * n1[0], bv + br * n1[1]]
+    const A2 = [au + ar * n2[0], av + ar * n2[1]], B2 = [bu + br * n2[0], bv + br * n2[1]]
+    const pts = [[BX, A1[1], A1[0]], [BX, B1[1], B1[0]]]
+    arcPts(bu, bv, br, B1, B2, uu, vv, 22, pts)
+    pts.push([BX, A2[1], A2[0]])
+    arcPts(au, av, ar, A2, A1, -uu, -vv, 22, pts)
+    return pts
   }
-  put(GEO.rbox(0.3, 0.22, 0.42, 0.02), motorBlueM, 5.85, 2.8, 1.56)
-  for (const ex of [5.72, 5.98]) put(GEO.disc(0.045, 0.05, 0.005, 16), darkSteel, ex, 2.8, 1.79, T2R)
-  const eb = new THREE.Mesh(new THREE.TorusGeometry(0.032, 0.009, 8, 20), darkSteel); eb.rotation.y = T2R; eb.position.set(5.85, 2.72, 1.98); fan.add(eb)
-  const es = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.011, 0.05, 10), darkSteel); es.position.set(5.85, 2.66, 1.98); fan.add(es)
-  fan.add(new THREE.Mesh(GEO.pipe([[5.92, 2.85, 1.7], [6.4, 2.5, 2.0], [6.65, 1.9, 2.1], [6.7, 1.5, 2.05]], 0.03, { radial: 10, tension: 0.2 }), hoseM))
-  put(GEO.rbox(0.3, 1.05, 0.08, 0.01), perfM, 6.7, 1.08, 2.05)
-  put(GEO.rbox(0.18, 0.24, 0.14, 0.02), yellowM, 6.7, 1.38, 2.12)
-  const rb = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.03, 16), redM); rb.rotation.x = T2R; rb.position.set(6.7, 1.38, 2.21); fan.add(rb)
+  // Belt centreline clears each pulley rim by more than the section radius, so
+  // the wrap arcs stay visible from the drive end instead of sinking into the
+  // pulley faces. The loop is still a constant-x Y-Z plane at x = BX.
+  const beltGap = 0.04
+  const bp = beltLoop(VZ, VY, BR + beltGap, MZ, MY, MRp + beltGap)
+  const beltCurve = new THREE.CatmullRomCurve3(bp.map((p) => new THREE.Vector3(p[0], p[1], p[2])), true, 'catmullrom', 0.0)
+  const beltMesh = new THREE.Mesh(new THREE.TubeGeometry(beltCurve, 220, 0.026, 10, true), darkSteel)
+  beltMesh.name = 'V-belt loop (Y-Z plane)'
+  fan.add(beltMesh)
+
+  // ---- SEALED TAPERED belt capsule, OUTBOARD at the +X drive end ------------
+  // A wide semicircle around the big volute pulley tapers to a narrow one around
+  // the small motor pulley, so the lower tip stops just past the MOTOR SHAFT
+  // instead of hanging down to the base frame. Solid face + full perimeter skirt
+  // + solid back plate keep belt, pulleys and shaft ends completely enclosed.
+  // Outline coords are (ly along the belt line, lz across it); the extruded
+  // Shape uses (x = lz, y = ly) because rotateY(T2R) maps shape-x into -z.
+  const outline = (rv, rm, cap = 28, side = 12) => {
+    const out = []
+    for (let i = 0; i <= side; i++) { const t = i / side; out.push([PM + (PV - PM) * t, rm + (rv - rm) * t]) }
+    for (let i = 1; i <= cap; i++) { const a = Math.PI * i / cap; out.push([PV - rv * Math.sin(a), rv * Math.cos(a)]) }
+    for (let i = 1; i <= side; i++) { const t = i / side; out.push([PV + (PM - PV) * t, -rv + (rv - rm) * t]) }
+    for (let i = 1; i < cap; i++) { const b = Math.PI * (1 - i / cap); out.push([PM + rm * Math.sin(b), rm * Math.cos(b)]) }
+    return out
+  }
+  const capsuleShape = (rv, rm) => new THREE.Shape(outline(rv, rm).map(([ly, lz]) => new THREE.Vector2(lz, ly)))
+  // BLACK maintenance opening (site photo 072858): a genuine circular hole cut
+  // in the guard face, lined with a dark well and closed by a matte black disc.
+  // It reads as a dark round inspection port; no belt or shaft is exposed.
+  const holeLy = PV + 0.42 * (PM - PV), holeLz = 0.14, holeR = 0.115
+  const [holeY, holeZ] = gp(holeLy, holeLz)
+  const faceShape = capsuleShape(RV, RM)
+  const holePath = new THREE.Path()
+  holePath.absarc(holeLz, holeLy, holeR, 0, Math.PI * 2, true)
+  faceShape.holes.push(holePath)
+  const faceGeo = new THREE.ExtrudeGeometry(faceShape, {
+    depth: 0.045, bevelEnabled: true, bevelThickness: 0.012,
+    bevelSize: 0.012, bevelSegments: 2, curveSegments: 64, steps: 1
+  })
+  faceGeo.rotateY(T2R); faceGeo.rotateX(GROT); faceGeo.translate(GX, GCY, GCZ)
+  const guardPlate = new THREE.Mesh(faceGeo, voluteM)
+  guardPlate.name = 'Solid oval belt guard'
+  fan.add(guardPlate)
+  // dark sleeve through the hole, matte black recessed interior, and a thin
+  // black rim so the port reads as an opening rather than a painted dot
+  const holeWell = putX(GEO.tube(holeR + 0.010, holeR - 0.006, 0.10, 48), guardHoleM, GX + 0.005, holeY, holeZ)
+  holeWell.name = 'Black guard maintenance opening liner'
+  const holeBack = putX(GEO.disc(holeR + 0.05, 0.014, 0.004, 48), guardHoleM, GX - 0.052, holeY, holeZ)
+  holeBack.name = 'Black guard maintenance opening interior'
+  const holeRim = putX(GEO.tube(holeR + 0.030, holeR + 0.004, 0.016, 48), guardHoleM, GX + 0.052, holeY, holeZ)
+  holeRim.name = 'Black guard maintenance opening rim'
+
+  // full-depth perimeter skirt: hollow capsule extrusion from back to face
+  const skirtShape = capsuleShape(RV + 0.02, RM + 0.02)
+  skirtShape.holes.push(new THREE.Path(outline(RV - 0.025, RM - 0.025).map(([ly, lz]) => new THREE.Vector2(lz, ly))))
+  const skirtGeo = new THREE.ExtrudeGeometry(skirtShape, { depth: GX - GBACK, bevelEnabled: false, curveSegments: 64, steps: 1 })
+  skirtGeo.rotateY(T2R); skirtGeo.rotateX(GROT); skirtGeo.translate(GBACK, GCY, GCZ)
+  const guardSkirt = new THREE.Mesh(skirtGeo, voluteM)
+  guardSkirt.name = 'Sealed belt guard perimeter skirt'
+  fan.add(guardSkirt)
+
+  // solid back plate closes the capsule on the volute / motor side
+  const backGeo = new THREE.ExtrudeGeometry(capsuleShape(RV, RM), { depth: 0.035, bevelEnabled: false, curveSegments: 64, steps: 1 })
+  backGeo.rotateY(T2R); backGeo.rotateX(GROT); backGeo.translate(GBACK - 0.035, GCY, GCZ)
+  const guardBack = new THREE.Mesh(backGeo, voluteM)
+  guardBack.name = 'Sealed belt guard back plate'
+  fan.add(guardBack)
+
+  const rimPts = outline(RV, RM, 36, 18).map(([ly, lz]) => { const [y, z] = gp(ly, lz); return new THREE.Vector3(GX + 0.052, y, z) })
+  const rimCurve = new THREE.CatmullRomCurve3(rimPts, true, 'catmullrom', 0.0)
+  const guardRim = new THREE.Mesh(new THREE.TubeGeometry(rimCurve, 160, 0.018, 8, true), galvM)
+  guardRim.name = 'Oval belt guard rim'
+  fan.add(guardRim)
+
+  // yellow-headed bolt row follows the near (+lz) edge and wraps both end caps,
+  // as in the site photo; dark washers keep the heads legible at view distance
+  const boltPath = []
+  for (let i = 0; i <= 8; i++) { const a = Math.PI / 2 - (Math.PI / 2) * (i / 8); boltPath.push([PV - RV * Math.sin(a), RV * Math.cos(a)]) }
+  for (let i = 1; i <= 22; i++) { const t = i / 22; boltPath.push([PV + (PM - PV) * t, RV + (RM - RV) * t]) }
+  for (let i = 1; i <= 8; i++) { const b = (Math.PI / 2) * (i / 8); boltPath.push([PM + RM * Math.sin(b), RM * Math.cos(b)]) }
+  const gb = [], gw = []
+  for (let i = 0; i < 21; i++) {
+    const [ly0, lz0] = boltPath[Math.round(i * (boltPath.length - 1) / 20)]
+    const ly = ly0 < PV ? PV + (ly0 - PV) * 0.86 : ly0 > PM ? PM + (ly0 - PM) * 0.86 : ly0
+    const lz = lz0 * 0.86
+    const [by, bz] = gp(ly, lz)
+    const w = new THREE.CylinderGeometry(0.032, 0.032, 0.012, 12)
+    w.rotateZ(-T2R); w.translate(GX + 0.055, by, bz); gw.push(w)
+    const b = new THREE.CylinderGeometry(0.024, 0.024, 0.040, 6)
+    b.rotateZ(-T2R); b.translate(GX + 0.072, by, bz); gb.push(b)
+  }
+  const guardWashers = new THREE.Mesh(GEO.merge(gw), darkSteel)
+  guardWashers.name = 'Oval guard bolt washers'
+  fan.add(guardWashers)
+  const guardBolts = new THREE.Mesh(GEO.merge(gb), guardBoltM)
+  guardBolts.name = 'Oval guard yellow bolts'
+  fan.add(guardBolts)
+
+  // two small latch / vent slots on the far (-lz) edge of the cover
+  const slotGeos = []
+  for (const t of [0.30, 0.62]) {
+    const ly = PV + (PM - PV) * t
+    const lz = -(RV + (RM - RV) * t) * 0.78
+    const [sy, sz] = gp(ly, lz)
+    const sg = new THREE.BoxGeometry(0.012, 0.14, 0.04)
+    sg.rotateX(GROT); sg.translate(GX + 0.062, sy, sz); slotGeos.push(sg)
+  }
+  const guardSlots = new THREE.Mesh(GEO.merge(slotGeos), darkSteel)
+  guardSlots.name = 'Oval guard latch slots'
+  fan.add(guardSlots)
 }
-lab.add(fan, { name: 'Centrifugal ID fan', explode: [0.9, 0, 0], label: 'ID fan · flexible-coupled motor', at: [5.85, 3.95, 0.4], value: () => 'centrifugal \u00b7 draws the scrubbed gas', count: 66 })
+lab.add(fan, { name: 'Centrifugal ID fan', explode: [0.9, 0, 0], label: 'ID fan · belt-driven motor', at: [5.85, 3.95, 0.4], value: () => 'centrifugal \u00b7 draws the scrubbed gas', count: 72 })
+// sub-part names so the gas outlet is easy to talk about
+lab.label(fan, 'Snail-shell blower (volute)', { at: [5.85, 3.15, 0.05], value: () => 'two-piece bolted casing \u00b7 gas out to stack' })
+lab.label(fan, 'Two-piece casing joint', { at: [5.70, 3.40, -0.35], value: () => 'equal-width halves \u00b7 circumferential split flange only' })
+lab.label(fan, 'Volute casing maintenance hatch', { at: [5.95, 3.12, 0.95], value: () => 'round bolted hatch \u00b7 upper-left of casing' })
+lab.label(fan, 'Blue motor (drive)', { at: [5.90, 1.22, 1.62], value: () => 'TEFC \u00b7 shaft +X \u00b7 near side' })
+lab.label(fan, 'Fully enclosed belt drive', { at: [6.58, 1.7, 1.55], value: () => 'sealed capsule \u00b7 no exposed belt' })
+lab.label(fan, 'Solid blower shaft guard', { at: [6.25, 2.3, 0.30], value: () => 'short solid tunnel \u00b7 no exposed rotation' })
+lab.label(fan, 'Solid oval belt guard', { at: [6.88, 1.7, 1.25], value: () => 'tapered \u00b7 starts at the motor shaft' })
+lab.label(fan, 'Black guard maintenance opening', { at: [6.90, 1.95, 0.68], value: () => 'dark inspection port \u00b7 sealed interior' })
 
 // ------------------------------------------------------------------ internals: quench zone, 4 cross-flow stages, demister
 const STAGE_X = [-1.95, -0.65, 0.65, 1.95]     // stage centre lines (m)
@@ -2461,7 +2688,11 @@ lab.mesh(GEO.rbox(0.07, 0.1, 2.24, 0.01), curtainM, { name: 'Water curtain label
   }
   pw.add(mkHatch(-0.55, 2.05, 1.25, 1.1, 1.0))
   pw.add(mkHatch(-2.9, 2.15, 1.25, 0.85, 0.8))
-  pw.add(mkHatch(4.05, 2.25, 0.99, 0.95, 1.05, -0.428))
+  // Taper access hatch (photo): a SMALL square bolted plate with twin grab handles,
+  // centred on the flat front panel of the square->round transition. The front
+  // panel falls from z=1.27 to z=0.75 over x=3.5..4.66 (slope -0.45), so the hatch
+  // is tilted +0.46 rad to lie ON that surface instead of cutting through it.
+  pw.add(mkHatch(4.05, 2.19, 1.05, 0.60, 0.62, 0.46))
   const lug = new THREE.Mesh(GEO.rbox(0.07, 0.24, 0.18, 0.01), ppM); lug.position.set(3.95, 3.44, 0); lug.rotation.z = -0.472; pw.add(lug)
   lab.add(pw, { name: 'Bolted panelwork', label: 'Bolted FRP panels', at: [-1.3, 3.72, 1.26], value: () => 'flanged + bolted joints \u00b7 as built', count: 40 })
 }
